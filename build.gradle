@@ -1,0 +1,231 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+    id "signing"
+}
+
+group = "io.github.tienquanutc"
+version = "0.1.0"
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+    withJavadocJar()
+}
+
+base {
+    archivesName = "minify4j"
+}
+
+dependencies {
+    implementation platform("com.dylibso.chicory:bom:1.7.5")
+    implementation "com.dylibso.chicory:compiler"
+    implementation "com.dylibso.chicory:runtime"
+    implementation "com.dylibso.chicory:wasm"
+
+    testImplementation platform("org.junit:junit-bom:5.10.3")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+tasks.register("fatJar", Jar) {
+    group = "build"
+    description = "Builds a standalone JAR containing Chicory runtime dependencies."
+    archiveClassifier = "all"
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+
+            pom {
+                name = "io.github.tienquanutc:minify4j"
+                description = "Java CSS and JavaScript minifier backed by Rust WASM and Chicory."
+                url = "https://github.com/tienquanutc/minify4j"
+
+                licenses {
+                    license {
+                        name = "MIT License"
+                        url = "https://opensource.org/license/mit"
+                    }
+                }
+
+                developers {
+                    developer {
+                        id = "tienquanutc"
+                        name = "Tien Quan"
+                        url = "https://github.com/tienquanutc"
+                    }
+                }
+
+                scm {
+                    connection = "scm:git:https://github.com/tienquanutc/minify4j.git"
+                    developerConnection = "scm:git:ssh://git@github.com:tienquanutc/minify4j.git"
+                    url = "https://github.com/tienquanutc/minify4j"
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = "centralStaging"
+            url = layout.buildDirectory.dir("central-staging")
+        }
+    }
+}
+
+def resolveSigningKey = {
+    def signingKey = findProperty("signingKey") ?: System.getenv("SIGNING_KEY")
+    def signingKeyBase64 = findProperty("signingKeyBase64") ?: System.getenv("SIGNING_KEY_BASE64")
+
+    if (signingKeyBase64) {
+        signingKey = new String(Base64.decoder.decode(signingKeyBase64.toString()), "UTF-8")
+    }
+
+    signingKey?.toString()?.replace("\\n", "\n")?.trim()
+}
+
+def resolveSigningPassword = {
+    def signingPassword = findProperty("signingPassword") ?: System.getenv("SIGNING_PASSWORD")
+    signingPassword?.toString()
+}
+
+signing {
+    def signingKey = resolveSigningKey()
+    def signingPassword = resolveSigningPassword()
+
+    if (signingKey) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    }
+
+    required = {
+        gradle.taskGraph.hasTask("publishMavenJavaPublicationToCentralStagingRepository")
+            || gradle.taskGraph.hasTask("centralPortalBundle")
+            || gradle.taskGraph.hasTask("uploadCentralPortalBundle")
+    }
+
+    sign publishing.publications.mavenJava
+}
+
+tasks.register("validateCentralSigning") {
+    group = "publishing"
+    description = "Fails early when Maven Central signing credentials are missing."
+
+    doLast {
+        def signingKey = resolveSigningKey()
+        def signingPassword = resolveSigningPassword()
+
+        if (!signingKey) {
+            throw new GradleException("Missing signing key. Set SIGNING_KEY, SIGNING_KEY_BASE64, -PsigningKey, or -PsigningKeyBase64.")
+        }
+
+        if (!signingPassword) {
+            throw new GradleException("Missing signing password. Set SIGNING_PASSWORD or pass -PsigningPassword.")
+        }
+
+        if (!signingKey.startsWith("-----BEGIN PGP PRIVATE KEY BLOCK-----")) {
+            throw new GradleException("SIGNING_KEY must be an ASCII-armored PGP private key. Export it with: gpg --armor --export-secret-keys <KEY_ID>")
+        }
+
+        if (!signingKey.endsWith("-----END PGP PRIVATE KEY BLOCK-----")) {
+            throw new GradleException("SIGNING_KEY is incomplete. It must include the full block from BEGIN PGP PRIVATE KEY BLOCK to END PGP PRIVATE KEY BLOCK.")
+        }
+    }
+}
+
+tasks.named("signMavenJavaPublication") {
+    dependsOn "validateCentralSigning"
+}
+
+tasks.register("cleanCentralStaging", Delete) {
+    delete layout.buildDirectory.dir("central-staging")
+    delete layout.buildDirectory.dir("central-portal")
+}
+
+tasks.named("publishMavenJavaPublicationToCentralStagingRepository") {
+    dependsOn "cleanCentralStaging"
+    dependsOn "validateCentralSigning"
+}
+
+tasks.register("centralPortalBundle", Zip) {
+    group = "publishing"
+    description = "Builds a Maven Central Publisher Portal deployment bundle."
+
+    dependsOn "publishMavenJavaPublicationToCentralStagingRepository"
+
+    archiveFileName = "central-bundle.zip"
+    destinationDirectory = layout.buildDirectory.dir("central-portal")
+    from layout.buildDirectory.dir("central-staging")
+    exclude "**/maven-metadata.xml*"
+}
+
+tasks.register("uploadCentralPortalBundle") {
+    group = "publishing"
+    description = "Uploads the Maven Central bundle to Central Portal. Set CENTRAL_PORTAL_USERNAME and CENTRAL_PORTAL_PASSWORD first."
+
+    dependsOn "centralPortalBundle"
+
+    doLast {
+        def username = findProperty("centralPortalUsername") ?: System.getenv("CENTRAL_PORTAL_USERNAME")
+        def password = findProperty("centralPortalPassword") ?: System.getenv("CENTRAL_PORTAL_PASSWORD")
+
+        if (!username || !password) {
+            throw new GradleException("Missing Central Portal token. Set CENTRAL_PORTAL_USERNAME and CENTRAL_PORTAL_PASSWORD.")
+        }
+
+        def bundleFile = tasks.named("centralPortalBundle", Zip).get().archiveFile.get().asFile
+        def publishingType = findProperty("centralPublishingType") ?: System.getenv("CENTRAL_PUBLISHING_TYPE") ?: "USER_MANAGED"
+        def deploymentName = findProperty("centralDeploymentName") ?: "${project.group}:${project.name}:${project.version}"
+        def boundary = "----minify4j-${System.currentTimeMillis()}"
+        def authToken = Base64.encoder.encodeToString("${username}:${password}".getBytes("UTF-8"))
+        def uploadUrl = new URL(
+            "https://central.sonatype.com/api/v1/publisher/upload"
+                + "?name=${URLEncoder.encode(deploymentName.toString(), "UTF-8")}"
+                + "&publishingType=${URLEncoder.encode(publishingType.toString(), "UTF-8")}"
+        )
+
+        HttpURLConnection connection = (HttpURLConnection) uploadUrl.openConnection()
+        connection.setRequestMethod("POST")
+        connection.setDoOutput(true)
+        connection.setRequestProperty("Authorization", "Bearer ${authToken}")
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=${boundary}")
+
+        connection.outputStream.withCloseable { output ->
+            output.write(("--${boundary}\r\n").getBytes("UTF-8"))
+            output.write(("Content-Disposition: form-data; name=\"bundle\"; filename=\"${bundleFile.name}\"\r\n").getBytes("UTF-8"))
+            output.write(("Content-Type: application/octet-stream\r\n\r\n").getBytes("UTF-8"))
+            bundleFile.withInputStream { input -> output << input }
+            output.write(("\r\n--${boundary}--\r\n").getBytes("UTF-8"))
+        }
+
+        def responseCode = connection.responseCode
+        def responseStream = responseCode >= 400 ? connection.errorStream : connection.inputStream
+        def responseBody = responseStream == null ? "" : responseStream.getText("UTF-8").trim()
+
+        if (responseCode < 200 || responseCode >= 300) {
+            throw new GradleException("Central Portal upload failed with HTTP ${responseCode}: ${responseBody}")
+        }
+
+        println "Central Portal deployment id: ${responseBody}"
+        println "Review deployment at https://central.sonatype.com/publishing/deployments"
+    }
+}

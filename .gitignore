@@ -1,0 +1,6 @@
+/minify4j-wasm/target
+/.gradle/
+/build/
+/out/
+/.idea/
+/gradle.properties

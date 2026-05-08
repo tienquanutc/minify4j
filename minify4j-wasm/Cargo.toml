@@ -1,0 +1,23 @@
+[package]
+name = "minify4j-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lightningcss = { version = "1.0.0-alpha.71", default-features = false }
+oxc_allocator = "0.129.0"
+oxc_codegen = "0.129.0"
+oxc_mangler = "0.129.0"
+oxc_minifier = "0.129.0"
+oxc_parser = "0.129.0"
+oxc_span = "0.129.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
